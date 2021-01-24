@@ -1,0 +1,1293 @@
+---
+title: "FROST Overview Jan 2021"
+author: "JReceveur"
+output: 
+  html_document:
+    code_folding: hide
+    toc: true
+    toc_depth: 3
+    toc_float: true
+---
+  
+  ```{r setup, include=FALSE}
+knitr::opts_chunk$set(fig.width=14, fig.height=10)
+knitr::opts_chunk$set(fig.align="center")
+```
+2,955,926 sequencing reads remained after quality filtering representing 475 sequence variants. 57 Samples remained after filtering and rarefaction (2,000 reads). 
+
+#Import{.tabset}
+##Sample Overview
+``` {r import, message=FALSE, warning=FALSE,echo=TRUE}
+set.seed(3246)
+#Parse Silva function
+parse_taxonomy_silva_128 <- function(char.vec){
+  # Use default to assign names to elements in case problem with greengenes prefix
+  char.vec = parse_taxonomy_default(char.vec)
+  # Check for unassigned taxa
+  if (char.vec["Rank1"] == "Unassigned") {
+    char.vec <- c(Rank1="D_0__Unassigned", Rank2="D_1__Unassigned", Rank3="D_2__Unassigned", Rank4="D_3__Unassigned",
+                  Rank5="D_4__Unassigned", Rank6="D_5__Unassigned", Rank7="D_6__Unassigned")
+  }
+  # Define the meaning of each prefix according to SILVA taxonomy
+  Tranks = c(D_0="Kingdom", D_1="Phylum", D_2="Class", D_3="Order", D_4="Family", D_5="Genus", D_6="Species")
+  # Check for prefix using regexp, warn if there were none. trim indices, ti
+  ti = grep("[[:alpha:]]\\_[[:digit:]]{1}\\_\\_", char.vec)
+  if( length(ti) == 0L ){
+    warning(
+      "No silva prefixes were found. \n",
+      "Consider using parse_taxonomy_delfault() instead if true for all OTUs. \n",
+      "Dummy ranks may be included among taxonomic ranks now."
+    )
+    # Will want to return without further modifying char.vec
+    taxvec = char.vec
+    # Replace names of taxvec according to prefix, if any present...
+  } else {
+    # Format character vectors for Ambiguous taxa
+    if( length(ti) < 7 ){
+      for (key in names(char.vec)) {
+        if ( char.vec[key] == "Ambiguous_taxa" ) {
+          tax_no <- (as.numeric(substr(key, 5, 5)) - 1)
+          char.vec[key] = sprintf("D_%s__Ambiguous_taxa", tax_no)
+        }
+      }
+      # Reset the trimmed indicies if Ambiguous taxa
+      ti = grep("[[:alpha:]]\\_[[:digit:]]{1}\\_\\_", char.vec)
+    }
+    # Remove prefix using sub-"" regexp, call result taxvec
+    taxvec = gsub("[[:alpha:]]\\_[[:digit:]]{1}\\_\\_", "", char.vec)
+    # Define the ranks that will be replaced
+    repranks = Tranks[substr(char.vec[ti], 1, 3)]
+    # Replace, being sure to avoid prefixes notK present in Tranks
+    names(taxvec)[ti[!is.na(repranks)]] = repranks[!is.na(repranks)]
+  }
+  return(taxvec)
+}
+#Load the packages needed
+#To install these packages, run the command install.packages("package name here"), you can also install multiple packages at a time (see R documentation online for more info)
+library(vegan)
+library(MASS)
+library(ggplot2)
+library(plyr)
+library(dplyr)
+library(magrittr)
+library(scales)
+library(grid)
+library(reshape2)
+library(phyloseq)
+library(randomForest)
+library(knitr)
+library(ape)
+library(ggpubr)
+library(viridis)
+cbPalette <- c("#999999", "#E69F00", "#56B4E9", "#009E73", "#F0E442", "#0072B2", "#D55E00", "#000000","#CC79A7") #Create a user defined color palette 
+theme_set(theme_bw(base_size = 18)+theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank()))#Set the general plotting theme see gggplot2 package for more info on other themes
+biom=import_biom("FROST2K.biom",parseFunction=parse_taxonomy_silva_128)#Import biom file and use the parse function built above
+#If you put the file inside the folder of the R project, you can call it by just typing the file name as in the line above. IF its somewhere else and you need to find the path use the command file.choose() to bring up a browser to find the file path.
+#biom
+#tax_table(biom)
+#tax_table(biom) <- tax_table(biom)[,-c(5:10,14)]#remove dummy ranks #Not needed
+
+metadata=read.table("FROSTMetadata12.22.txt",header = TRUE) #Pull in your metadata and name the R object as metadata
+metadata$LocDonor<-paste0(metadata$SampleLoc,":",metadata$Donor_ID) #Create a new field in the metadata by combining the sample loc and donor ID fields
+metadata$Time2<-as.character(metadata$Time)#Change the formatting of Time into a character vector rather than numerical
+tree=read_tree("FROSTTree.nwk") #Read in the phylogenetic tree of the bacteria that was built in earlier processing
+
+
+#This next few lines takes the individual files and combines them into a single object to make it easier to work with
+sampdat=sample_data(metadata)
+sample_names(sampdat)=metadata$SampleID
+physeq=merge_phyloseq(biom,sampdat,tree)
+
+physeq=subset_taxa(physeq,Kingdom!="Archaea")
+physeq
+#Currently physeq is the name of the object that combines your biom table (the number of sequences), the metadata and taxonomy
+```
+
+##Metadata
+```{r}
+metadata
+```
+
+#Alpha Diversity{.tabset}
+
+
+##Observed Species
+```{r}
+ObservedSpecies<-plot_richness(physeq, x="CADD",color="Donor_ID",shape="Donor_ID", measures=c("Observed"))+ylab("Observed Species")+facet_wrap(~SampleLoc)+geom_point()+scale_fill_manual(cbPalette)+geom_point(size=5)
+ObservedSpecies
+ObservedRichness<-ObservedSpecies$data
+head(ObservedRichness)
+
+kruskal.test(value~Donor_ID, data=ObservedRichness)
+ddply(ObservedRichness, c("Donor_ID"), summarise,
+                 N    = length(value),
+                 mean = mean(value),
+                 sd   = sd(value),
+                 se   = sd / sqrt(N)
+)
+GutObs<-subset(ObservedRichness,SampleLoc=="Gut")
+MouthObs<-subset(ObservedRichness,SampleLoc=="Mouth")
+
+#head(GutInvSimp)
+print("Gut only")
+kruskal.test(value~Donor_ID, data=GutObs)
+ddply(GutObs, c("Donor_ID"), summarise,
+                 N    = length(value),
+                 mean = mean(value),
+                 sd   = sd(value),
+                 se   = sd / sqrt(N)
+)
+print("Mouth only")
+kruskal.test(value~Donor_ID, data=MouthObs)
+ddply(MouthObs, c("Donor_ID"), summarise,
+                 N    = length(value),
+                 mean = mean(value),
+                 sd   = sd(value),
+                 se   = sd / sqrt(N)
+)
+
+
+#plot richness is an already built function from the phyloseq package, to get more information about any package you can use the command ?packagename for example typing  (and running) ?phyloseq  will bring up the phyloseq help
+
+#The variables in quotes are the ones from your metadata file or from the function you are running to look at different metadata just change the text in the quotes to another column name from your metadata.
+```
+
+##Inverse Simpson
+```{r}
+InvSimp<-plot_richness(physeq, x="CADD",color="Donor_ID",shape="Donor_ID", measures=c("InvSimpson"))+ylab("Inverse Simpson")+facet_wrap(~SampleLoc)+geom_point()+scale_fill_manual(cbPalette)+geom_point(size=5)
+InvSimp
+InvSimpData<-InvSimp$data
+kruskal.test(value~Donor_ID, data=InvSimpData)
+
+ddply(InvSimpData, c("Donor_ID"), summarise,
+                 N    = length(value),
+                 mean = mean(value),
+                 sd   = sd(value),
+                 se   = sd / sqrt(N)
+)
+GutObs<-subset(InvSimpData,SampleLoc=="Gut")
+MouthObs<-subset(InvSimpData,SampleLoc=="Mouth")
+
+#head(GutInvSimp)
+print("Gut only")
+kruskal.test(value~Donor_ID, data=GutObs)
+ddply(GutObs, c("Donor_ID"), summarise,
+                 N    = length(value),
+                 mean = mean(value),
+                 sd   = sd(value),
+                 se   = sd / sqrt(N)
+)
+print("Mouth only")
+kruskal.test(value~Donor_ID, data=MouthObs)
+ddply(MouthObs, c("Donor_ID"), summarise,
+                 N    = length(value),
+                 mean = mean(value),
+                 sd   = sd(value),
+                 se   = sd / sqrt(N)
+)
+
+
+
+```
+
+##Shannon Diversity
+```{r}
+Shannon<-plot_richness(physeq, x="CADD",color="Donor_ID",shape="Donor_ID", measures=c("Shannon"))+ylab("Shannon Diversity")+facet_wrap(~SampleLoc)+geom_point()+scale_fill_manual(cbPalette)+geom_point(size=5)
+Shannon
+ShannonData<-Shannon$data
+kruskal.test(value~Donor_ID, data=ShannonData)
+ddply(ShannonData, c("Donor_ID"), summarise,
+                 N    = length(value),
+                 mean = mean(value),
+                 sd   = sd(value),
+                 se   = sd / sqrt(N)
+)
+GutObs<-subset(ShannonData,SampleLoc=="Gut")
+MouthObs<-subset(ShannonData,SampleLoc=="Mouth")
+
+#head(GutInvSimp)
+print("Gut only")
+kruskal.test(value~Donor_ID, data=GutObs)
+ddply(GutObs, c("Donor_ID"), summarise,
+                 N    = length(value),
+                 mean = mean(value),
+                 sd   = sd(value),
+                 se   = sd / sqrt(N)
+)
+print("Mouth only")
+kruskal.test(value~Donor_ID, data=MouthObs)
+ddply(MouthObs, c("Donor_ID"), summarise,
+                 N    = length(value),
+                 mean = mean(value),
+                 sd   = sd(value),
+                 se   = sd / sqrt(N)
+)
+
+
+
+```
+
+
+
+#Taxa Plots{.tabset}
+
+*Note: Other taxa (present at an abundance lower than the cutoff, for example 0.1% at the phylum level) make up the remainder of the relative abundance for each sample (100%). While not shown here, will be combined into an other category for any actual manuscript figures.
+```{r taxafiltering}
+
+
+GPr  = transform_sample_counts(physeq, function(x) x / sum(x) ) #transform samples based on relative abundance
+GPrPhylum=tax_glom(GPr, "Phylum")
+PhylumLevel = filter_taxa(GPrPhylum, function(x) mean(x) > 1e-3, TRUE) #filter out any taxa lower tha 0.1%
+GPrFamily=tax_glom(GPr,"Family")
+FamilyLevel = filter_taxa(GPrFamily, function(x) mean(x) > 1e-2, TRUE) #filter out any taxa lower tha 1%
+GPrGenus=tax_glom(GPr,"Genus")
+GenusLevel = filter_taxa(GPrGenus, function(x) mean(x) > 2e-2, TRUE) #filter out any taxa lower tha 2%
+```
+
+##Total Abundances across all samples
+Relative Abundances of  bacterial phyla
+
+Across all samples, 10 bacterial phyla were identified. Three taxa (Proteobacteria (44.68%), Bacteroidetes (25.76%), and Firmicutes (21.98%) represented 92% of the total bacterial relative abundance across all samples.
+
+At the family level, 64 families were identified with 17 families comprising greater than 1% of the total relative abundance. The three most abundant families were Enterobacteriaceae (20.1% of total abundance), Pseudomonadaceae (18.1%), and Bacteroidaceae (17.1%)                                                                      
+
+172 genera were identified with 14 comprising greater than 1% of the total relative abundance
+476 ESVs remained after quality filtering, removal of singletons, etc.
+
+```{r TotalABUs,warning=F}
+GPr  = transform_sample_counts(physeq, function(x) x / sum(x) ) #transform samples based on relative abundance
+PhylumAll=tax_glom(GPr, "Phylum")
+PhylumLevel = filter_taxa(PhylumAll, function(x) mean(x) > 1e-3, TRUE) #filter out any taxa lower tha 1%
+FamilyAll=tax_glom(GPr,"Family")
+FamilyLevel = filter_taxa(FamilyAll, function(x) mean(x) > 1e-2, TRUE) #filter out any taxa lower than 1%
+GenusAll=tax_glom(GPr,"Genus")
+GenusLevel = filter_taxa(GenusAll, function(x) mean(x) > 1e-2, TRUE) #filter out any taxa lower tha 1%
+
+df <- psmelt(PhylumAll)
+df$Abundance=df$Abundance*100
+Trtdata <- ddply(df, c("Phylum"), summarise,
+                 N    = length(Abundance),
+                 mean = mean(Abundance),
+                 sd   = sd(Abundance),
+                 se   = sd / sqrt(N)
+)
+#ddply from the ddplyr package is being used here to calculate the mean, standard deviation and standard error of your samples, see below for other examples using it to do the same thing but also between different sample groups
+Trtdata
+print("Family level abundances across all samples (> 1% of total relative abundances")
+df <- psmelt(FamilyLevel)
+df$Abundance=df$Abundance*100
+Trtdata <- ddply(df, c("Family"), summarise,
+                 N    = length(Abundance),
+                 mean = mean(Abundance),
+                 sd   = sd(Abundance),
+                 se   = sd / sqrt(N)
+)
+Trtdata
+
+
+```
+
+
+##Phylum Level
+
+
+
+
+
+```{r TreatmentPlot5}
+df <- psmelt(PhylumLevel)
+df$Abundance=df$Abundance*100
+Trtdata <- ddply(df, c("Phylum","SampleLoc","Donor_ID","Time"), summarise,
+                 N    = length(Abundance),
+                 mean = mean(Abundance)
+)
+#Trtdata
+```
+
+
+```{r}
+
+PhylumPlot=ggplot(Trtdata, aes(x=Time,y=mean))+geom_bar(aes(fill = Phylum),colour="black", stat="identity")+
+  facet_grid(~Phylum)+xlab("Timepoint")+ylab("Relative Abundance (%, > 0.1%)") + theme(axis.text.x = element_text(angle = 0, hjust = 0.5))+
+  facet_grid(Donor_ID~SampleLoc)+scale_fill_viridis_d()
+#scale_x_discrete(labels=c("0 hrs", "24 hrs", "48 hrs","72 hrs"))+ theme(axis.text.x = element_text(angle = 45, hjust = 1))#+ scale_fill_manual(values=cbPalette)
+PhylumPlot
+
+df <- psmelt(PhylumAll)
+df$Abundance=df$Abundance*100
+Trtdata <- ddply(df, c("Phylum","Donor_ID"), summarise,
+                 N    = length(Abundance),
+                 mean = mean(Abundance)
+)
+Donor004<-subset(Trtdata,Donor_ID=="18-004")
+Donor004<-subset(Donor004,mean!=0)
+Unique004<-unique(Donor004$Phylum)
+Donor006<-subset(Trtdata,Donor_ID=="18-006")
+Donor006<-subset(Donor006,mean!=0)
+
+Unique006<-unique(Donor006$Phylum)
+
+print("N Phyla unique to 18-004")
+
+length(subset(Unique004,!(Unique004 %in% Unique006)))
+
+print("N Phyla unique to 18-006")
+length(subset(Unique006,!(Unique006 %in% Unique004))) 
+
+```
+
+###Abundances subset by Donor (18-004)
+
+```{r}
+PhylumAll004<-subset_samples(PhylumAll,Donor_ID=="18-004")
+
+PhylumAll004<-filter_taxa(PhylumAll004, function (x) {sum(x > 0) > 1}, prune=TRUE) #Remove phyla with 0 abundance
+df <- psmelt(PhylumAll004)
+df$Abundance=df$Abundance*100
+compare_means(Abundance~SampleLoc, data=df,group.by="Phylum",method = "kruskal.test",p.adjust.method="fdr")
+
+Trtdata <- ddply(df, c("Phylum","SampleLoc"), summarise,
+                 N    = length(Abundance),
+                 mean = mean(Abundance),
+                 sd   = sd(Abundance),
+                 se   = sd / sqrt(N)
+)
+Trtdata
+cdataplot=ggplot(Trtdata, aes(x=SampleLoc,y=mean))+geom_bar(aes(fill = SampleLoc),colour="black", stat="identity")+ facet_wrap(~Phylum)+xlab(" Location (Donor 18-004)")+ylab("Relative Abundance (%,SEM)") + theme(axis.text.x = element_text(angle = 0, hjust = 0.5),legend.position = "none")+geom_errorbar(aes(ymin=mean-se,ymax=mean+se))+scale_fill_viridis_d()
+cdataplot
+
+TrtdataSubset<-subset(Trtdata, Phylum=="Bacteroidetes"|Phylum=="Firmicutes"|Phylum=="Proteobacteria"|Phylum=="Verrucomicrobia")
+KWResults<-data.frame(Phylum = c("Bacteroidetes","Firmicutes","Proteobacteria","Verrucomicrobia"), label= c("Kruskal-Wallis,\n P-adj < 0.001","KW, P-adj < 0.001","KW, P-adj < 0.001","KW, P-adj < 0.001"))
+
+
+SubsetPlot=ggplot(TrtdataSubset, aes(x=SampleLoc,y=mean))+geom_bar(aes(fill = SampleLoc),colour="black", stat="identity")+ facet_wrap(~Phylum)+xlab("Location (Donor 18-004)")+ylab("Relative Abundance (%, SEM)") + theme(axis.text.x = element_text(angle = 0, hjust = 0.5),legend.position = "none")+geom_errorbar(aes(ymin=mean-se,ymax=mean+se))+scale_fill_viridis_d()+theme(legend.position = "none")+geom_text(aes(label = label),data=KWResults, size = 4, x = 1, y = 60)
+SubsetPlot
+
+
+
+
+```
+
+###Abundances subset by donor (18-006)
+
+```{r}
+PhylumAll006<-subset_samples(PhylumAll,Donor_ID=="18-006")
+
+PhylumAll006<-filter_taxa(PhylumAll006, function (x) {sum(x > 0) > 1}, prune=TRUE) #Remove phyla with 0 abundance
+df <- psmelt(PhylumAll006)
+df$Abundance=df$Abundance*100
+compare_means(Abundance~SampleLoc, data=df,group.by="Phylum",method = "kruskal.test",p.adjust.method="fdr")
+
+Trtdata <- ddply(df, c("Phylum","SampleLoc"), summarise,
+                 N    = length(Abundance),
+                 mean = mean(Abundance),
+                 sd   = sd(Abundance),
+                 se   = sd / sqrt(N)
+)
+Trtdata
+cdataplot=ggplot(Trtdata, aes(x=SampleLoc,y=mean))+geom_bar(aes(fill = SampleLoc),colour="black", stat="identity")+ facet_wrap(~Phylum)+xlab("Sample Location")+ylab("Relative Abundance (%, > 0.01%)") + theme(axis.text.x = element_text(angle = 0, hjust = 0.5))+theme(axis.title.x=element_blank())+geom_errorbar(aes(ymin=mean-se,ymax=mean+se))+scale_fill_viridis_d()
+cdataplot
+
+
+TrtdataSubset<-subset(Trtdata, Phylum=="Bacteroidetes"|Phylum=="Firmicutes"|Phylum=="Proteobacteria"|Phylum=="Actinobacteria")
+KWResults<-data.frame(Phylum = c("Bacteroidetes","Firmicutes","Proteobacteria","Actinobacteria"), label= c("KW, P-adj = 0.02","KW, P-adj = 0.7","KW, P-adj = 0.03","Kruskal-Wallis,\n P-adj = 0.02"))
+
+
+SubsetPlot=ggplot(TrtdataSubset, aes(x=SampleLoc,y=mean))+geom_bar(aes(fill = SampleLoc),colour="black", stat="identity")+ facet_wrap(~Phylum)+xlab("Location (Donor 18-006)")+ylab("Relative Abundance (%, SEM)") + theme(axis.text.x = element_text(angle = 0, hjust = 0.5))+geom_errorbar(aes(ymin=mean-se,ymax=mean+se))+scale_fill_viridis_d()+theme(legend.position = "none")+geom_text(aes(label = label),data=KWResults, size = 4, x = 1, y = 55)
+SubsetPlot
+
+
+```
+
+##Family Level
+
+
+
+
+```{r TreatmentPlot}
+df <- psmelt(FamilyLevel)
+df$Abundance=df$Abundance*100
+Trtdata <- ddply(df, c("Family","SampleLoc","Donor_ID","Time"), summarise,
+                 N    = length(Abundance),
+                 mean = mean(Abundance)
+)
+#Trtdata
+
+
+FamilyPlot=ggplot(Trtdata, aes(x=Time,y=mean))+geom_bar(aes(fill = Family),colour="black", stat="identity")+
+  facet_grid(~Family)+xlab("Timepoint")+ylab("Relative Abundance (%, > 1%)") + theme(axis.text.x = element_text(angle = 0, hjust = 0.5))+
+  facet_grid(Donor_ID~SampleLoc)+scale_fill_viridis_d()#+  scale_fill_manual(values=cbPalette)
+#scale_x_discrete(labels=c("0 hrs", "24 hrs", "48 hrs","72 hrs"))+ theme(axis.text.x = element_text(angle = 45, hjust = 1))#+ scale_fill_manual(values=cbPalette)
+FamilyPlot
+df <- psmelt(FamilyAll)
+df$Abundance=df$Abundance*100
+Trtdata <- ddply(df, c("Family","Donor_ID"), summarise,
+                 N    = length(Abundance),
+                 mean = mean(Abundance)
+)
+print("Unique Families")
+length(unique(Trtdata$Family))
+Donor004<-subset(Trtdata,Donor_ID=="18-004")
+Donor004<-subset(Donor004,mean!=0)
+Unique004<-unique(Donor004$Family)
+
+
+Donor006<-subset(Trtdata,Donor_ID=="18-006")
+Donor006<-subset(Donor006,mean!=0)
+
+Unique006<-unique(Donor006$Family)
+
+print("N Families unique to 18-004")
+
+length(subset(Unique004,!(Unique004 %in% Unique006)))
+
+print("N Families unique to 18-006")
+length(subset(Unique006,!(Unique006 %in% Unique004))) 
+
+
+```
+
+Abundances subset by Donor (18-004)
+
+```{r}
+FamilyAll004<-subset_samples(FamilyLevel,Donor_ID=="18-004")
+
+FamilyAll004<-filter_taxa(FamilyAll004, function (x) {sum(x > 0) > 1}, prune=TRUE) #Remove phyla with 0 abundance
+df <- psmelt(FamilyAll004)
+df$Abundance=df$Abundance*100
+compare_means(Abundance~SampleLoc, data=df,group.by="Family",method = "kruskal.test",p.adjust.method="fdr")
+
+Trtdata <- ddply(df, c("Family","SampleLoc"), summarise,
+                 N    = length(Abundance),
+                 mean = mean(Abundance),
+                 sd   = sd(Abundance),
+                 se   = sd / sqrt(N)
+)
+Trtdata
+cdataplot=ggplot(Trtdata, aes(x=SampleLoc,y=mean))+geom_bar(aes(fill = SampleLoc),colour="black", stat="identity")+ facet_wrap(~Family)+xlab("Location (Donor 18-004)")+ylab("Relative Abundance (%, SEM)") + theme(axis.text.x = element_text(angle = 0, hjust = 0.5),legend.position = "none")+geom_errorbar(aes(ymin=mean-se,ymax=mean+se))+scale_fill_viridis_d()
+cdataplot
+
+TrtdataSubset<-subset(Trtdata, Family=="Bacteroidaceae"|Family=="Enterobacteriaceae"|Family=="Lachnospiraceae"|Family=="Moraxellaceae"|Family=="Prevotellaceae"|Family=="Pseudomonadaceae")
+TrtdataSubset
+KWResults<-data.frame(Family = c("Bacteroidaceae","Enterobacteriaceae","Prevotellaceae","Pseudomonadaceae","Moraxellaceae","Lachnospiraceae"), label= c("Kruskal-Wallis,\n P-adj < 0.001","KW,\n P-adj < 0.001","KW,\n P-adj < 0.001","KW,\n P-adj < 0.001","KW,\n P-adj < 0.001","KW,\n P-adj < 0.001"))
+
+
+SubsetPlot2<-ggplot(TrtdataSubset, aes(x=SampleLoc,y=mean))+geom_bar(aes(fill = SampleLoc),colour="black", stat="identity")+ facet_wrap(~Family)+xlab("Location (Donor 18-004)")+ylab("Relative Abundance (%, SEM)") + theme(axis.text.x = element_text(angle = 0, hjust = 0.5))+geom_errorbar(aes(ymin=mean-se,ymax=mean+se))+scale_fill_viridis_d()+theme(legend.position = "none")+geom_text(aes(label = label),data=KWResults, size = 4, x = c(2,1,1,1,1,1), y = 40)
+SubsetPlot2
+
+
+df <- psmelt(FamilyAll004)
+df$Abundance=df$Abundance*100
+dfSubset004<-subset(df, Family=="Bacteroidaceae"|Family=="Enterobacteriaceae"|Family=="Lachnospiraceae"|Family=="Pseudomonadaceae")
+FamilyADDPlot004<- ggplot(dfSubset004, aes(x=CADD,y=Abundance,color=SampleLoc,shape=SampleLoc))+geom_point(size=3)+facet_grid(~Family)+ylab("Relative abundance (%)")+xlab("Acumulated Degree Days (18-004)")+ theme(legend.justification=c(0.05,0.95),legend.position=c(0.52,0.95),legend.background = element_rect(fill="transparent"),legend.title = element_blank())+ guides(colour = guide_legend(override.aes = list(size=4)))+scale_color_viridis_d()#
+FamilyADDPlot004
+#g <- ggplot_build(FamilyADDPlot004)
+#unique(g$data[[1]]["colour"])
+
+```
+
+Abundances subset by Donor (18-006)
+
+```{r}
+FamilyAll006<-subset_samples(FamilyLevel,Donor_ID=="18-006")
+
+FamilyAll006<-filter_taxa(FamilyAll006, function (x) {sum(x > 0) > 1}, prune=TRUE) #Remove families with 0 abundance
+df <- psmelt(FamilyAll006)
+df$Abundance=df$Abundance*100
+compare_means(Abundance~SampleLoc, data=df,group.by="Family",method = "kruskal.test",p.adjust.method="fdr")
+
+Trtdata <- ddply(df, c("Family","SampleLoc"), summarise,
+                 N    = length(Abundance),
+                 mean = mean(Abundance),
+                 sd   = sd(Abundance),
+                 se   = sd / sqrt(N)
+)
+Trtdata
+cdataplot=ggplot(Trtdata, aes(x=SampleLoc,y=mean))+geom_bar(aes(fill = SampleLoc),colour="black", stat="identity")+ facet_wrap(~Family)+xlab("Location (Donor 18-006)")+ylab("Relative Abundance (%, SEM)") + theme(axis.text.x = element_text(angle = 0, hjust = 0.5),legend.position = "none")+geom_errorbar(aes(ymin=mean-se,ymax=mean+se))+scale_fill_viridis_d()
+cdataplot
+
+TrtdataSubset<-subset(Trtdata, Family=="Bacteroidaceae"|Family=="Enterobacteriaceae"|Family=="Staphylococcaceae"|Family=="Ruminococcaceae"|Family=="Streptococcaceae"|Family=="Pseudomonadaceae")
+TrtdataSubset
+KWResults<-data.frame(Family = c("Bacteroidaceae","Enterobacteriaceae","Staphylococcaceae","Pseudomonadaceae","Streptococcaceae","Ruminococcaceae"), label= c("Kruskal-Wallis,\n P-adj < 0.01","P-adj < 0.01","KW,\n P-adj < 0.01","KW,\n P-adj < 0.01","KW,\n P-adj < 0.01","KW,\n P-adj < 0.01"))
+
+
+SubsetPlot2<-ggplot(TrtdataSubset, aes(x=SampleLoc,y=mean))+geom_bar(aes(fill = SampleLoc),colour="black", stat="identity")+ facet_wrap(~Family)+xlab("Location (Donor 18-006)")+ylab("Relative Abundance (%, SEM)") + theme(axis.text.x = element_text(angle = 0, hjust = 0.5))+geom_errorbar(aes(ymin=mean-se,ymax=mean+se))+scale_fill_viridis_d()+theme(legend.position = "none")+geom_text(aes(label = label),data=KWResults, size = 4, x = c(2,1,1,1,1,1), y = c(40,50,40,40,40,40))
+SubsetPlot2
+
+
+df <- psmelt(FamilyAll006)
+df$Abundance=df$Abundance*100
+dfSubset006<-subset(df, Family=="Bacteroidaceae"|Family=="Enterobacteriaceae"|Family=="Ruminococcaceae"|Family=="Staphylococcaceae")
+FamilyADDPlot006<-ggplot(dfSubset006, aes(x=CADD,y=Abundance,color=SampleLoc,shape=SampleLoc))+geom_point(size=3)+facet_grid(~Family)+ylab("Relative abundance (%)")+xlab("Acumulated Degree Days (18-006)")+ theme(legend.justification=c(0.05,0.95),legend.position=c(0.52,0.95),legend.background = element_rect(fill="transparent"),legend.title = element_blank())+ guides(colour = guide_legend(override.aes = list(size=4)))+scale_color_viridis_d()#
+FamilyADDPlot006
+
+
+theme_set(theme_bw(base_size = 13)+theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank()))
+
+dev.off()
+tiff("Figures/FamilyLevelADD.tiff", width = 174, height = 174, units = 'mm', res = 600)
+ggarrange(FamilyADDPlot004,FamilyADDPlot006,
+          labels = c("a","b"),
+          ncol = 1, nrow = 2)
+dev.off()
+
+
+```
+
+##Genus level
+
+```{r Summarizing3,warning=FALSE}
+df <- psmelt(GenusLevel)
+df$Abundance=df$Abundance*100
+Trtdata <- ddply(df, c("Genus","SampleLoc","Donor_ID","Time"), summarise,
+                 N    = length(Abundance),
+                 mean = mean(Abundance)
+)
+#Trtdata
+
+
+GenusPlot=ggplot(Trtdata, aes(x=Time,y=mean))+geom_bar(aes(fill = Genus),colour="black", stat="identity")+
+  facet_grid(~Genus)+xlab("Timepoint")+ylab("Relative Abundance (%, > 1%)") + theme(axis.text.x = element_text(angle = 0, hjust = 0.5))+
+  facet_grid(Donor_ID~SampleLoc)+scale_fill_viridis_d()#+  scale_fill_manual(values=cbPalette)
+#scale_x_discrete(labels=c("0 hrs", "24 hrs", "48 hrs","72 hrs"))+ theme(axis.text.x = element_text(angle = 45, hjust = 1))#+ scale_fill_manual(values=cbPalette)
+GenusPlot
+
+df <- psmelt(GenusAll)
+df$Abundance=df$Abundance*100
+Trtdata <- ddply(df, c("Genus","Donor_ID"), summarise,
+                 N    = length(Abundance),
+                 mean = mean(Abundance)
+)
+UniquePhylum<-unique(Trtdata$Genus)
+
+Donor004<-subset(Trtdata,Donor_ID=="18-004")
+Unique004<-unique(Donor004$Genus)
+length(Unique004)
+Donor006<-subset(Trtdata,Donor_ID=="18-006")
+Unique006<-unique(Donor006$Genus)
+length(Unique006)
+
+subset(Unique006,!(Unique004 %in% Unique006))
+subset(Unique004,!(Unique006 %in% Unique004))
+
+
+```
+
+#Ordinations
+
+-Ellipses with 95% CI for the mean of each group not shown due to sample size
+
+##PCoA {.tabset}
+
+###Weighted UniFrac Distance
+
+```{r PCoA, warning=FALSE}
+set.seed(1245)
+
+sample_data(physeq)$Time2<-as.character(sample_data(physeq)$Time)
+ord=ordinate(physeq,"PCoA", "wunifrac")
+ordplot=plot_ordination(physeq, ord,"samples", color="CADD",shape="SampleLoc")+geom_point(size=5)+scale_colour_gradient(low = "grey",
+  high = "black")+facet_wrap(~Donor_ID)#+scale_colour_manual(values=cbPalette)+scale_fill_manual(values=cbPalette)
+ordplot
+
+GPdist=phyloseq::distance(physeq, "wunifrac")
+adonis(GPdist ~ Donor_ID*CADD+SampleLoc, as(sample_data(physeq), "data.frame"))
+
+```
+
+###Jaccard Distance
+
+```{r PCoA2,warning=F}
+set.seed(1245)
+
+ord=ordinate(physeq,"PCoA", "jaccard")
+ordplot=plot_ordination(physeq, ord,"samples", color="Time",shape="SampleLoc")+geom_point(size=5)+scale_colour_gradient(low = "grey",
+high = "black")+facet_wrap(~Donor_ID)#+scale_colour_manual(values=cbPalette)+scale_fill_manual(values=cbPalette)
+ordplot
+```
+
+#Beta diversity{.tabset}
+
+##Multivariate Dispersions
+Homogenieity of Multivariate Dispersions:
+
+###Weighted UniFrac
+
+```{r, warning=FALSE}
+set.seed(1245)
+
+GPdist=phyloseq::distance(physeq, "wunifrac")
+beta=betadisper(GPdist, sample_data(physeq)$SampleLoc)
+permutest(beta)
+boxplot(beta)
+
+
+```
+
+###Jaccard 
+
+```{r, warning=FALSE}
+set.seed(1245)
+
+GPdist=phyloseq::distance(physeq, "jaccard")
+beta=betadisper(GPdist, sample_data(physeq)$LocDonor)
+permutest(beta)
+boxplot(beta)
+```
+
+##PERMANOVA
+
+###Weighted UniFrac
+
+```{r}
+set.seed(1245)
+
+GPdist=phyloseq::distance(physeq, "wunifrac")
+adonis(GPdist ~ SampleLoc*Donor_ID+Time, as(sample_data(physeq), "data.frame"))
+```
+
+###Jaccard Distance
+
+```{r}
+GPdist=phyloseq::distance(physeq, "jaccard")
+adonis(GPdist ~ SampleLoc*Donor_ID+Time, as(sample_data(physeq), "data.frame"))
+```
+
+#Random Forest predictions{.tabset}
+
+*Note time is not shown due to number of replicates within a time/sample location not being sufficient for a reliable OOB estimate of error rate or test/training set. 
+
+##Donor 
+
+```{r}
+set.seed(1245)
+ForestData=GenusAll#Change this one so you dont have to rewrite all variables
+predictors=t(otu_table(ForestData))
+response <- as.factor(sample_data(ForestData)$SampleLoc)
+rf.data <- data.frame(response, predictors)
+MozzieForest <- randomForest(response~., data = rf.data, ntree = 1000,importance=T)
+
+print(MozzieForest)#returns overall Random Forest results
+imp <- importance(MozzieForest)#all the steps that are imp or imp. are building a dataframe that contains info about the taxa used by the Random Forest testto classify treatment 
+imp <- data.frame(predictors = rownames(imp), imp)
+imp.sort <- arrange(imp, desc(MeanDecreaseAccuracy))
+imp.sort$predictors <- factor(imp.sort$predictors, levels = imp.sort$predictors)
+imp.20 <- imp.sort[1:20, ]#
+
+
+destroyX = function(es) {
+  f = es
+  for (row in c(1:nrow(f))){ #for each column in dataframe
+    if (startsWith(row.names(f)[row], "X") == TRUE)  { #if starts with 'X' ..
+      row.names(f)[row] <- substr(row.names(f)[row], 2, 100) #get rid of it
+    }
+    assign(deparse(substitute(es)), f, inherits = TRUE)
+  }
+}
+destroyX(imp.20)
+
+write.csv(imp.20, "RandomForestIndicatorsMDGDonor.csv")
+
+```
+
+
+
+###Top 10 genus level indicator taxa for differences between donor (MDA)
+
+```{r}
+otunames <- row.names(imp.20)
+r <- rownames(tax_table(ForestData)) %in% otunames
+GenusRandomForestSubset = subset_taxa(GenusAll, row.names(tax_table(GenusAll))%in% otunames)
+GenusRandomForestSubset
+
+df <- psmelt(GenusRandomForestSubset)
+df$Abundance=df$Abundance*100
+
+Trtdata <- ddply(df, c("Genus","SampleLoc","Donor_ID","Time"), summarise,
+                 N    = length(Abundance),
+                 mean = mean(Abundance)
+)
+#Trtdata
+cdataplot=ggplot(Trtdata, aes(x=Time,y=mean))+geom_bar(aes(fill = Genus),colour="black", stat="identity")+ facet_grid(Donor_ID~SampleLoc)+xlab("Time")+ylab("Relative Abundance (%)") + theme(axis.text.x = element_text(angle = 0, hjust = 0.5))+scale_fill_viridis_d()
+cdataplot
+
+```
+
+##Sample Location
+
+```{r}
+#GenusAll
+set.seed(1245)
+ForestData=GenusAll#Change this one so you dont have to rewrite all variables
+predictors=t(otu_table(ForestData))
+response <- as.factor(sample_data(ForestData)$SampleLoc)
+rf.data <- data.frame(response, predictors)
+MozzieForest <- randomForest(response~., data = rf.data, ntree = 1000,importance=T)
+print(MozzieForest)#returns overall Random Forest results
+imp <- importance(MozzieForest)#all the steps that are imp or imp. are building a dataframe that contains info about the taxa used by the Random Forest testto classify treatment 
+imp <- data.frame(predictors = rownames(imp), imp)
+imp.sort <- arrange(imp, desc(MeanDecreaseAccuracy))
+imp.sort$predictors <- factor(imp.sort$predictors, levels = imp.sort$predictors)
+imp.20 <- imp.sort[1:10, ]#
+
+destroyX(imp.20)
+
+write.csv(imp.20, "RandomForestIndicatorsMDGDonor.csv")
+
+
+
+otunames <- row.names(imp.20)
+r <- rownames(tax_table(ForestData)) %in% otunames
+df <- psmelt(GenusAll)
+#head(df)
+GenusRandomForestSubset = subset_taxa(GenusAll, row.names(tax_table(GenusAll))%in% otunames)
+GenusRandomForestSubset
+
+df <- psmelt(GenusRandomForestSubset)
+df$Abundance=df$Abundance*100
+
+Trtdata <- ddply(df, c("Genus","SampleLoc","Donor_ID","Time"), summarise,
+                 N    = length(Abundance),
+                 mean = mean(Abundance)
+)
+Trtdata
+
+compare_means(Abundance ~ Donor_ID, data = df, group.by = "Genus", p.adjust.method = "fdr",method="kruskal.test")
+
+
+cdataplot=ggplot(Trtdata, aes(x=Time,y=mean))+geom_bar(aes(fill = Genus),colour="black", stat="identity")+ facet_grid(Donor_ID~SampleLoc)+xlab("Time")+ylab("Relative Abundance (%)") + theme(axis.text.x = element_text(angle = 0, hjust = 0.5))+scale_fill_viridis_d()
+cdataplot
+
+```
+
+#RF Regression models
+###RandomForestRegressions
+
+```{r}
+print("Donor 18-004")
+Donor004<-subset(metadata,Donor_ID=="18-004")
+min(Donor004$CADD)
+max(Donor004$CADD)
+print("Donor 18-006")
+Donor006<-subset(metadata,Donor_ID=="18-006")
+min(Donor006$CADD)
+max(Donor006$CADD)
+```
+
+
+```{r}
+library(randomForest)
+library(ranger)
+library(caTools)
+library(randomForestCI)
+physeq
+
+otu <- as.data.frame(t(otu_table(physeq)))
+
+
+otu$SampleID <- rownames(otu)
+meta_sa <- metadata %>% select(SampleID, CADD,Donor_ID)
+otu <- merge(meta_sa, otu, by = 'SampleID')
+
+otu <- otu[,-1] #Remove SampleID from predictors
+otu <-otu[,-2] #Remove DonorID from predictors
+names(otu) <- make.names(names(otu))
+
+
+
+
+
+sample = sample.split(otu, SplitRatio = .75)
+train = subset(otu, sample == TRUE)
+test  = subset(otu, sample == FALSE)
+
+features<-setdiff(names(otu),"CADD")
+# mTune<-tuneRF(
+#   x=otu[features],
+#   y=otu$CADD,
+#   ntreeTry = 5000,
+#   mtryStart = 5,
+#   stepFactor = 1.5,
+#   improve = 0.01,
+#   trace=F
+# )
+
+
+
+set.seed(1245)
+m1 <- randomForest(
+  formula = CADD ~ .,
+  data    = otu,
+  ntree= 500,mtry=73, keep.inbag=T,importance=T)
+
+
+
+
+TreeFile<-data.frame(seq(1,500,by=1),m1$mse)
+colnames(TreeFile)<-c("Tree","MSE")
+ErrorByTree<-ggplot(TreeFile,aes(x=Tree,y=MSE))+geom_line()+xlab("Tree")+ylab("Mean Squared Error")
+ErrorByTree
+#head(TreeFile)
+#varImpPlot(m1,type=1)
+
+X <- test
+var_hat <- randomForestInfJack(m1, otu, calibrate = TRUE)
+
+#head(var_hat)
+
+df <- data.frame(y = otu, var_hat)
+df <- mutate(df, se = sqrt(var.hat))
+#head(df)
+print(m1)
+(sqrt(m1$mse))[500] #RMSE at final tree
+
+
+p1 <- ggplot(df, aes(x = y.CADD, y = y.hat))
+p1<-p1 + geom_errorbar(aes(ymin=y.hat-se, ymax=y.hat+se),color="grey", width=.1) +
+  geom_point() +
+  geom_abline(intercept=0, slope=1, linetype=2)+
+  xlab("True ADD") +
+  ylab("Predicted ADD (ASV, \u00b1 95% CIs)")+annotate("text", label = "% Var explained = 65.27\n RMSE = 21.11", size = 4, x = 50, y = 110)#+geom_jitter(width = 0.5)
+p1
+
+physeq
+# importance<-importance(m1, type=1)
+# head(importance)
+# imp <- data.frame(predictors = rownames(importance), importance)
+# imp
+# 
+# imp.sort <- arrange(imp, desc(X.IncMSE))
+# imp.sort
+# imp.sort$predictors <- factor(imp.sort$predictors, levels = imp.sort$predictors)
+# imp.20 <- imp.sort[1:20, ]
+# imp.20
+# TopPredictors<-ggplot(imp.20,aes(x=predictors,y=X.IncMSE))+geom_bar(stat="identity")+ylab("% Increase in MSE")+xlab("Top Predictors")+coord_flip()
+
+```
+
+###RF Regression model genus level
+```{r}
+#############33
+#Random Forest Genus Level
+##############
+#Genus Level
+set.seed(1245)
+Genus <- as.data.frame(t(otu_table(GenusAll)))
+
+Genus$SampleID <- rownames(Genus)
+meta_sa <- metadata %>% select(SampleID, CADD,Donor_ID)
+Genus <- merge(meta_sa, Genus, by = 'SampleID')
+
+Genus <- Genus[,-1] #Remove SampleID from predictors
+Genus <-Genus[,-2] #Remove sample location from predictors
+names(Genus) <- make.names(names(Genus))
+
+
+
+features<-setdiff(names(Genus),"CADD")
+# mTune<-tuneRF(
+#   x=Genus[features],
+#   y=Genus$CADD,
+#   ntreeTry = 50,
+#   mtryStart = 2,
+#   stepFactor = 1.5,
+#   improve = 1,
+#   trace=F
+# )
+
+set.seed(1245)
+mGenus <- randomForest(
+  formula = CADD ~ .,
+  data    = Genus,
+  ntree= 500, keep.inbag=T,importance=T)
+#head(Genus)
+
+
+
+TreeFile<-data.frame(seq(1,500,by=1),sqrt(mGenus$mse))
+colnames(TreeFile)<-c("Tree","MSE")
+ErrorByTreeGenus<-ggplot(TreeFile,aes(x=Tree,y=MSE))+geom_line()+xlab("Tree")+ylab("RSME (Genus, ADD)")
+ErrorByTreeGenus
+
+var_hat <- randomForestInfJack(mGenus, Genus, calibrate = TRUE)
+
+#head(var_hat)
+
+dfGenus <- data.frame(y = Genus, var_hat)
+dfGenus <- mutate(dfGenus, se = sqrt(var.hat))
+#head(df)
+mGenus
+(sqrt(mGenus$mse))[500] #RMSE at final tree
+
+
+pGenus <- ggplot(dfGenus, aes(x = y.CADD, y = y.hat))
+pGenus<-pGenus + geom_errorbar(aes(ymin=y.hat-se, ymax=y.hat+se),position = "dodge",color="grey", width=.1) +
+  geom_point() +
+  geom_abline(intercept=0, slope=1, linetype=2)+
+  xlab("True ADD") +
+  ylab("Predicted ADD (Genus, \u00b1 95% CIs)")+annotate("text", label = "% Var explained = 63.14\n RMSE = 21.74", size = 4, x = 50, y = 110)#+geom_jitter(width = 0.5)
+pGenus
+
+```
+
+
+
+###Random Forest Family Level
+
+
+```{r}
+#Family Level
+
+Family <- as.data.frame(t(otu_table(FamilyAll)))
+
+Family$SampleID <- rownames(Family)
+meta_sa <- metadata %>% select(SampleID, CADD,Donor_ID)
+Family <- merge(meta_sa, Family, by = 'SampleID')
+
+Family <- Family[,-1] #Remove SampleID from predictors
+Family <-Family[,-2] #Remove sample location from predictors
+names(Family) <- make.names(names(Family))
+
+set.seed(1245)
+mFamily <- randomForest(
+  formula = CADD ~ .,
+  data    = Family,
+  ntree= 500, keep.inbag=T,importance=T)
+
+print(mFamily)
+var_hat <- randomForestInfJack(mFamily, Family, calibrate = TRUE)
+
+#head(var_hat)
+
+df <- data.frame(y = Family, var_hat)
+df <- mutate(df, se = sqrt(var.hat))
+#head(df)
+(sqrt(mFamily$mse))[500] #RMSE at final tree
+
+pFamily <- ggplot(df, aes(x = y.CADD, y = y.hat))
+pFamily<-pFamily + geom_errorbar(aes(ymin=y.hat-se, ymax=y.hat+se),position = "dodge",color="grey", width=.1) +
+  geom_point() +
+  geom_abline(intercept=0, slope=1, linetype=2)+
+  xlab("True ADD") +
+  ylab("Predicted CADD (Family, \u00b1 95% CIs)")+annotate("text", label = "% Var explained = 61.42\n RMSE = 22.25", size = 4, x = 50, y = 110)#+geom_jitter(width = 0.5)
+pFamily
+```
+
+
+###Phylum Level RF
+
+```{r}
+Phylum <- as.data.frame(t(otu_table(PhylumAll)))
+
+Phylum$SampleID <- rownames(Phylum)
+meta_sa <- metadata %>% select(SampleID, CADD,Donor_ID)
+Phylum <- merge(meta_sa, Phylum, by = 'SampleID')
+
+Phylum <- Phylum[,-1] #Remove SampleID from predictors
+Phylum <-Phylum[,-2] #Remove sample location from predictors
+names(Phylum) <- make.names(names(Phylum))
+
+set.seed(1245)
+mPhylum <- randomForest(
+  formula = CADD ~ .,
+  data    = Phylum,
+  ntree= 500, keep.inbag=T,importance=T)
+
+print(mPhylum)
+
+var_hat <- randomForestInfJack(mPhylum, Phylum, calibrate = TRUE)
+#head(var_hat)
+
+df <- data.frame(y = Phylum, var_hat)
+df <- mutate(df, se = sqrt(var.hat))
+#head(df)
+mPhylum
+(sqrt(mPhylum$mse))[500] #RMSE at final tree
+
+
+pPhylum <- ggplot(df, aes(x = y.CADD, y = y.hat))
+pPhylum<-pPhylum + geom_errorbar(aes(ymin=y.hat-se, ymax=y.hat+se),position = "dodge",color="grey", width=.1) +
+  geom_abline(intercept=0, slope=1, linetype=2)+geom_point()+
+  xlab("True ADD") +
+  ylab("Predicted ADD (Phylum, \u00b1 95% CIs)")+annotate("text", label = "% Var explained = 36.87\n RMSE = 28.46", size = 4, x = 50, y = 110)#+geom_jitter(width = 0.5)
+pPhylum
+
+# ############3
+# Join together CADD plots
+# ############
+# pPhylum
+# pFamily
+# pGenus
+# p1
+# theme_set(theme_bw(base_size = 11)+theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank()))
+# dev.off()
+# tiff("Figures/ADHRandomForest.tiff", width = 174, height = 174, units = 'mm', res = 1200)
+# ggarrange(pPhylum,pFamily,pGenus,p1,
+#           labels = c("a", "b","c","d"), ncol = 2,nrow=2)
+# dev.off()
+# 
+# 
+
+
+
+
+
+
+```
+
+
+##Subset by sample type (Mouth)
+
+```{r}
+Mouth<-subset_samples(GenusLevel,SampleLoc=="Mouth")
+Mouth
+otu <- as.data.frame(t(otu_table(Mouth)))
+
+
+otu$SampleID <- rownames(otu)
+meta_sa <- metadata %>% select(SampleID, CADD,SampleLoc)
+otu <- merge(meta_sa, otu, by = 'SampleID')
+
+otu <- otu[,-1] #Remove SampleID from predictors
+otu <-otu[,-2] #Remove SampleLoc from predictors
+names(otu) <- make.names(names(otu))
+
+
+
+sample = sample.split(otu, SplitRatio = .75)
+train = subset(otu, sample == TRUE)
+test  = subset(otu, sample == FALSE)
+
+features<-setdiff(names(otu),"CADD")
+# mTune<-tuneRF(
+#   x=otu[features],
+#   y=otu$CADD,
+#   ntreeTry = 5000,
+#   mtryStart = 5,
+#   stepFactor = 1.5,
+#   improve = 0.01,
+#   trace=F
+# )
+
+
+
+set.seed(1245)
+m1 <- randomForest(
+  formula = CADD ~ .,
+  data    = otu,
+  ntree= 1000, mtry=14,keep.inbag=T,importance=T)
+
+
+
+
+TreeFile<-data.frame(seq(1,1000,by=1),m1$mse)
+colnames(TreeFile)<-c("Tree","MSE")
+ErrorByTree<-ggplot(TreeFile,aes(x=Tree,y=MSE))+geom_line()+xlab("Tree")+ylab("Mean Squared Error")
+#ErrorByTree
+#head(TreeFile)
+#varImpPlot(m1,type=1)
+
+X <- test
+var_hat <- randomForestInfJack(m1, otu, calibrate = TRUE)
+
+#head(var_hat)
+
+df <- data.frame(y = otu, var_hat)
+df <- mutate(df, se = sqrt(var.hat))
+#head(df)
+print(m1)
+(sqrt(m1$mse))[1000] #RMSE at final tree
+
+
+MouthRF <- ggplot(df, aes(x = y.CADD, y = y.hat))
+MouthRF<-MouthRF + geom_errorbar(aes(ymin=y.hat-se, ymax=y.hat+se),color="grey", width=.1) +
+  geom_point() +
+  geom_abline(intercept=0, slope=1, linetype=2)+
+  xlab("True ADD (Mouth Only)") +
+  ylab("Predicted ADD (\u00b1 95% CIs)")+annotate("text", label = "% Var explained = 75.49\n RMSE = 17.84", size = 4, x = 50, y = 110)#+geom_jitter(width = 0.5)
+MouthRF
+#Colors
+#1	#FDE725FF			
+#11	#440154FF
+
+
+detach("package:ranger", unload=TRUE)
+library(randomForest)
+imp <- importance(m1)#all the steps that are imp or imp. are building a dataframe that contains info about the taxa used by the Random Forest testto classify treatment 
+imp <- data.frame(predictors = rownames(imp), imp)
+
+imp.sort <- arrange(imp, desc(X.IncMSE))
+imp.sort$predictors <- factor(imp.sort$predictors, levels = imp.sort$predictors)
+imp.20 <- imp.sort[1:10, ]#
+imp.20
+
+
+destroyX = function(es) {
+  f = es
+  for (row in c(1:nrow(f))){ #for each column in dataframe
+    if (startsWith(row.names(f)[row], "X") == TRUE)  { #if starts with 'X' ..
+      row.names(f)[row] <- substr(row.names(f)[row], 2, 100) #get rid of it
+    }
+    assign(deparse(substitute(es)), f, inherits = TRUE)
+  }
+}
+destroyX(imp.20)
+
+
+otunames <- row.names(imp.20)
+r <- rownames(tax_table(GenusLevel)) %in% otunames
+PredictorTable<-kable(tax_table(GenusLevel)[r, ])#returns a list of the most important predictors for Random Forest Classification
+ggplot(imp.20, aes(x = predictors, y = X.IncMSE)) +
+  geom_bar(stat = "identity", fill = "indianred") +
+  coord_flip() +ylab("Percent increase in MSE")+
+  ggtitle("Most important genera for classifying\n  Mouth samples by ADD")#\n in a string tells it to start a new line
+PredictorTable
+imp.4<-imp.20[1:4,]
+otunames <- row.names(imp.4)
+
+GenusRandomForestSubset = subset_taxa(GenusAll, row.names(tax_table(GenusAll))%in% otunames)
+GenusRandomForestSubset
+
+df <- psmelt(GenusRandomForestSubset)
+df$Abundance=df$Abundance*100
+dfMouth<-subset(df, SampleLoc=="Mouth")
+
+
+MouthTopIndicators=ggplot(dfMouth, aes(x=CADD,y=Abundance))+geom_point()+facet_wrap(~Genus)+xlab("Acumulated Degree Days")+theme(legend.position = "none")+ylab("Relative Abundance (%, Mouth)")+scale_color_viridis_d()
+MouthTopIndicators
+
+```
+
+
+##Subset by sample type (Gut)
+
+```{r}
+Gut<-subset_samples(GenusLevel,SampleLoc=="Gut")
+Gut
+otu <- as.data.frame(t(otu_table(Gut)))
+
+
+otu$SampleID <- rownames(otu)
+meta_sa <- metadata %>% select(SampleID, CADD,SampleLoc)
+otu <- merge(meta_sa, otu, by = 'SampleID')
+
+otu <- otu[,-1] #Remove SampleID from predictors
+otu <-otu[,-2] #Remove SampleLoc from predictors
+names(otu) <- make.names(names(otu))
+
+
+
+sample = sample.split(otu, SplitRatio = .75)
+train = subset(otu, sample == TRUE)
+test  = subset(otu, sample == FALSE)
+
+# features<-setdiff(names(otu),"CADD")
+# mTune<-tuneRF(
+#   x=otu[features],
+#   y=otu$CADD,
+#   ntreeTry = 5000,
+#   mtryStart = 5,
+#   stepFactor = 1.5,
+#   improve = 0.01,
+#   trace=F
+# )
+
+
+
+set.seed(1245)
+m1 <- randomForest(
+  formula = CADD ~ .,
+  data    = otu,
+  ntree= 1000,mtry=14, keep.inbag=T,importance=T)
+
+
+
+
+TreeFile<-data.frame(seq(1,1000,by=1),m1$mse)
+colnames(TreeFile)<-c("Tree","MSE")
+ErrorByTree<-ggplot(TreeFile,aes(x=Tree,y=MSE))+geom_line()+xlab("Tree")+ylab("Mean Squared Error")
+#ErrorByTree
+#head(TreeFile)
+#varImpPlot(m1,type=1)
+
+X <- test
+var_hat <- randomForestInfJack(m1, otu, calibrate = TRUE)
+
+#head(var_hat)
+
+df <- data.frame(y = otu, var_hat)
+df <- mutate(df, se = sqrt(var.hat))
+#head(df)
+print(m1)
+(sqrt(m1$mse))[1000] #RMSE at final tree
+
+
+GutRF <- ggplot(df, aes(x = y.CADD, y = y.hat))
+GutRF<-GutRF + geom_errorbar(aes(ymin=y.hat-se, ymax=y.hat+se),color="grey", width=.1) +
+  geom_point() +
+  geom_abline(intercept=0, slope=1, linetype=2)+
+  xlab("True ADD (Gut Only)") +
+  ylab("Predicted ADD (\u00b1 95% CIs)")+annotate("text", label = "% Var explained = 60.67\n RMSE = 22.33", size = 4, x = 50, y = 110)#+geom_jitter(width = 0.5)
+GutRF
+
+#detach("package:ranger", unload=TRUE)
+library(randomForest)
+imp <- importance(m1)#all the steps that are imp or imp. are building a dataframe that contains info about the taxa used by the Random Forest testto classify treatment 
+imp <- data.frame(predictors = rownames(imp), imp)
+
+imp.sort <- arrange(imp, desc(X.IncMSE))
+imp.sort
+imp.sort$predictors <- factor(imp.sort$predictors, levels = imp.sort$predictors)
+imp.20 <- imp.sort[1:10, ]#
+imp.20
+
+
+destroyX = function(es) {
+  f = es
+  for (row in c(1:nrow(f))){ #for each column in dataframe
+    if (startsWith(row.names(f)[row], "X") == TRUE)  { #if starts with 'X' ..
+      row.names(f)[row] <- substr(row.names(f)[row], 2, 100) #get rid of it
+    }
+    assign(deparse(substitute(es)), f, inherits = TRUE)
+  }
+}
+destroyX(imp.20)
+row.names(imp.20)
+
+
+otunames <- row.names(imp.20)
+r <- rownames(tax_table(GenusLevel)) %in% otunames
+otunames
+PredictorTable<-kable(tax_table(GenusLevel)[r, ])#returns a list of the most important predictors for Random Forest Classification
+ggplot(imp.20, aes(x = predictors, y = X.IncMSE)) +
+  geom_bar(stat = "identity", fill = "indianred") +
+  coord_flip() +ylab("Percent increase in MSE")+
+  ggtitle("Most important genera for classifying\n gut samples by ADD")#\n in a string tells it to start a new line
+PredictorTable
+imp.4<-imp.20[1:4,]
+otunames <- row.names(imp.4)
+
+GenusRandomForestSubset = subset_taxa(GenusAll, row.names(tax_table(GenusAll))%in% otunames)
+GenusRandomForestSubset
+
+df <- psmelt(GenusRandomForestSubset)
+df$Abundance=df$Abundance*100
+dfGut<-subset(df, SampleLoc=="Gut")
+
+
+GutTopIndicators=ggplot(dfGut, aes(x=CADD,y=Abundance))+geom_point()+facet_wrap(~Genus)+xlab("Acumulated Degree Days")+theme(legend.position = "none")+ylab("Relative Abundance (%, Gut)")#+scale_color_viridis_d()
+GutTopIndicators
+```
+
+```{r}
+
+theme_set(theme_bw(base_size = 11)+theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank()))
+dev.off()
+tiff("Figures/MouthVGutRF.tiff", width = 174, height = 174, units = 'mm', res = 1200)
+ggarrange(GutRF,MouthRF,GutTopIndicators,MouthTopIndicators,
+          labels = c("a", "b","c","d"), ncol = 2,nrow=2)
+dev.off()
+
+
+
+```
